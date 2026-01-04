@@ -9,7 +9,7 @@ OpenAI-compatible speech-to-text transcription server using [google/medasr](http
 - Model loaded once at startup and cached in memory (no reloading per request)
 - GPU acceleration support (auto-detected)
 - YAML configuration
-- Temporary audio files cleaned up after each request
+- Audio processed in-memory (no temporary files on disk)
 
 ## Installation
 

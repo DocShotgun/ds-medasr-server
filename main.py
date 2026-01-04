@@ -10,12 +10,12 @@ Usage:
 The server will start at http://localhost:8000 by default.
 
 Note: The model is loaded once at startup and cached in memory for all
-subsequent requests. Temporary audio files are cleaned up after each request.
+subsequent requests. Audio is processed in-memory without temporary files.
 """
 
+import io
 import logging
 import os
-import tempfile
 from contextlib import asynccontextmanager
 from pathlib import Path
 
@@ -79,12 +79,12 @@ def load_model():
     return _model, _processor
 
 
-def transcribe_audio(audio_path: str) -> str:
+def transcribe_audio(audio_bytes: bytes) -> str:
     """
-    Transcribe an audio file using the MedASR model.
+    Transcribe audio from bytes using the MedASR model.
 
     Args:
-        audio_path: Path to the audio file
+        audio_bytes: Raw audio file bytes
 
     Returns:
         Transcribed text
@@ -96,8 +96,9 @@ def transcribe_audio(audio_path: str) -> str:
 
     device = get_device()
 
-    # Load and resample audio to 16kHz
-    speech, sample_rate = librosa.load(audio_path, sr=16000)
+    # Load audio from bytes (in-memory)
+    audio_stream = io.BytesIO(audio_bytes)
+    speech, sample_rate = librosa.load(audio_stream, sr=16000)
 
     # Process audio with processor
     inputs = _processor(
@@ -175,46 +176,35 @@ async def create_transcription(
             detail=f"Unsupported audio format: {file_ext}. Allowed: {', '.join(allowed_extensions)}",
         )
 
-    # Save uploaded file to temporary location
-    with tempfile.NamedTemporaryFile(suffix=file_ext, delete=False) as temp_file:
-        try:
-            # Read file content in chunks to avoid memory issues with large files
-            file_content = b""
-            while True:
-                chunk = await file.read(1024 * 1024)  # 1MB chunks
-                if not chunk:
-                    break
-                file_content += chunk
-                temp_file.write(chunk)
-            temp_file_path = temp_file.name
+    # Read audio file into memory
+    try:
+        audio_content = await file.read()
+    except Exception as e:
+        logger.error(f"Failed to read uploaded file: {e}")
+        raise HTTPException(
+            status_code=400,
+            detail="Failed to read uploaded audio file.",
+        )
 
-            # Verify file has content
-            if len(file_content) == 0:
-                raise HTTPException(
-                    status_code=400,
-                    detail="Empty file received. No audio data to transcribe.",
-                )
+    # Verify file has content
+    if len(audio_content) == 0:
+        raise HTTPException(
+            status_code=400,
+            detail="Empty file received. No audio data to transcribe.",
+        )
 
-            # Transcribe
-            try:
-                transcription = transcribe_audio(temp_file_path)
-            except Exception as e:
-                import traceback
-                logger.exception(f"Transcription failed: {e}")
-                raise HTTPException(
-                    status_code=500,
-                    detail="Transcription failed. See server logs for details.",
-                )
+    # Transcribe
+    try:
+        transcription = transcribe_audio(audio_content)
+    except Exception as e:
+        logger.exception(f"Transcription failed: {e}")
+        raise HTTPException(
+            status_code=500,
+            detail="Transcription failed. See server logs for details.",
+        )
 
-            # Return OpenAI-compatible response
-            return JSONResponse(content={"text": transcription})
-
-        finally:
-            # Clean up temporary file
-            try:
-                os.unlink(temp_file_path)
-            except OSError:
-                pass
+    # Return OpenAI-compatible response
+    return JSONResponse(content={"text": transcription})
 
 
 def main():
