@@ -13,6 +13,7 @@ Note: The model is loaded once at startup and cached in memory for all
 subsequent requests. Temporary audio files are cleaned up after each request.
 """
 
+import logging
 import os
 import tempfile
 from contextlib import asynccontextmanager
@@ -24,6 +25,10 @@ import yaml
 from fastapi import FastAPI, File, Form, HTTPException, UploadFile
 from fastapi.responses import JSONResponse
 from transformers import AutoModelForCTC, AutoProcessor
+
+# Configure logging
+logging.basicConfig(level=logging.INFO, format="%(asctime)s - %(levelname)s - %(message)s")
+logger = logging.getLogger(__name__)
 
 # Load configuration
 CONFIG_PATH = Path(__file__).parent / "config.yaml"
@@ -60,7 +65,7 @@ def load_model():
     model_name = config.get("model", {}).get("name", "google/medasr")
     device = get_device()
 
-    print(f"Loading model {model_name} on device: {device}")
+    logger.info(f"Loading model {model_name} on device: {device}")
 
     # Set HuggingFace token if provided
     hf_token = config.get("huggingface", {}).get("token")
@@ -70,7 +75,7 @@ def load_model():
     _processor = AutoProcessor.from_pretrained(model_name)
     _model = AutoModelForCTC.from_pretrained(model_name).to(device)
 
-    print("Model loaded successfully!")
+    logger.info("Model loaded successfully!")
     return _model, _processor
 
 
@@ -119,16 +124,16 @@ def transcribe_audio(audio_path: str) -> str:
 async def lifespan(app: FastAPI):
     """Lifespan context manager for startup and shutdown events."""
     # Startup: Load model
-    print("Starting MedASR server...")
+    logger.info("Starting MedASR server...")
     try:
         load_model()
-        print("Server ready!")
+        logger.info("Server ready!")
     except Exception as e:
-        print(f"Warning: Could not load model at startup: {e}")
-        print("Model will be loaded on first request.")
+        logger.warning(f"Could not load model at startup: {e}")
+        logger.info("Model will be loaded on first request.")
     yield
     # Shutdown
-    print("Shutting down MedASR server...")
+    logger.info("Shutting down MedASR server...")
 
 
 app = FastAPI(
@@ -174,20 +179,31 @@ async def create_transcription(
     with tempfile.NamedTemporaryFile(suffix=file_ext, delete=False) as temp_file:
         try:
             # Read file content in chunks to avoid memory issues with large files
+            file_content = b""
             while True:
                 chunk = await file.read(1024 * 1024)  # 1MB chunks
                 if not chunk:
                     break
+                file_content += chunk
                 temp_file.write(chunk)
             temp_file_path = temp_file.name
+
+            # Verify file has content
+            if len(file_content) == 0:
+                raise HTTPException(
+                    status_code=400,
+                    detail="Empty file received. No audio data to transcribe.",
+                )
 
             # Transcribe
             try:
                 transcription = transcribe_audio(temp_file_path)
             except Exception as e:
+                import traceback
+                logger.exception(f"Transcription failed: {e}")
                 raise HTTPException(
                     status_code=500,
-                    detail=f"Transcription failed: {str(e)}",
+                    detail="Transcription failed. See server logs for details.",
                 )
 
             # Return OpenAI-compatible response
@@ -208,7 +224,7 @@ def main():
     host = config.get("server", {}).get("host", "0.0.0.0")
     port = config.get("server", {}).get("port", 8000)
 
-    print(f"Starting MedASR server on {host}:{port}")
+    logger.info(f"Starting MedASR server on {host}:{port}")
     uvicorn.run(app, host=host, port=port)
 
 
